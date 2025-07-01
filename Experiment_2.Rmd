@@ -1,0 +1,1339 @@
+---
+title: "Experiment 2"
+author: "Ying"
+date: "2025-06-28"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(esquisse)
+library(shiny)
+library(ggplot2)
+library(dplyr)
+```
+
+# Load profile data
+```{r}
+library(tidyverse)
+library(jsonlite)
+
+profile1 <- read.csv("/Users/yingdai/Desktop/AgentSociety/Results/output0628/profile1.csv") %>% mutate(
+    parsed = map(profile, fromJSON)  # 解析JSON字符串
+  ) %>% 
+  unnest_wider(parsed) %>%  # 展开JSON到新列
+  select(-profile)  # 删除原始列
+
+
+profile2 <- read.csv("/Users/yingdai/Desktop/AgentSociety/Results/output0628/profile2.csv") %>% mutate(
+    parsed = map(profile, fromJSON)  # 解析JSON字符串
+  ) %>% 
+  unnest_wider(parsed) %>%  # 展开JSON到新列
+  select(-profile)  # 删除原始列
+
+
+profile.all <- rbind(profile1, profile2)
+
+
+profile.all <- profile.all %>% dplyr::mutate_if(is.character, as.factor)
+str(profile.all)
+
+profile.all <- profile.all %>% dplyr::filter(id > 4)
+
+# 清理因子水平
+profile.all_clean <- droplevels(profile.all)
+
+# 重置关键变量的因子（如education）
+edu_levels <- sort(unique(profile.all_clean$education)) # 按实际值排序
+profile.all_clean$education <- factor(profile.all_clean$education, levels = edu_levels)
+
+race_levels <- sort(unique(profile.all_clean$race)) # 按实际值排序
+profile.all_clean$race <- factor(profile.all_clean$race, levels = race_levels)
+
+gender_levels <- sort(unique(profile.all_clean$gender)) # 按实际值排序
+profile.all_clean$gender <- factor(profile.all_clean$gender, levels = gender_levels)
+
+
+skill_levels <- sort(unique(profile.all_clean$skill)) # 按实际值排序
+profile.all_clean$skill <- factor(profile.all_clean$skill, levels = skill_levels)
+
+occupation_levels <- sort(unique(profile.all_clean$occupation)) # 按实际值排序
+profile.all_clean$occupation <- factor(profile.all_clean$occupation, levels = occupation_levels)
+
+family_consumption_levels <- sort(unique(profile.all_clean$family_consumption)) # 按实际值排序
+profile.all_clean$family_consumption <- factor(profile.all_clean$family_consumption, levels = family_consumption_levels)
+
+consumption_levels <- sort(unique(profile.all_clean$consumption)) # 按实际值排序
+profile.all_clean$consumption <- factor(profile.all_clean$consumption, levels = consumption_levels)
+
+personality_levels <- sort(unique(profile.all_clean$personality)) # 按实际值排序
+profile.all_clean$personality <- factor(profile.all_clean$personality, levels = personality_levels)
+
+residence_levels <- sort(unique(profile.all_clean$residence)) # 按实际值排序
+profile.all_clean$residence <- factor(profile.all_clean$residence, levels = residence_levels)
+
+
+religion_levels <- sort(unique(profile.all_clean$religion)) # 按实际值排序
+profile.all_clean$religion <- factor(profile.all_clean$religion, levels = religion_levels)
+
+
+marital_status_levels <- sort(unique(profile.all_clean$marital_status)) # 按实际值排序
+profile.all_clean$marital_status <- factor(profile.all_clean$marital_status, levels = marital_status_levels)
+```
+
+
+
+## Generate vulnerability index
+```{r}
+library(dplyr)
+library(cluster)  # For Gower distance calculation
+
+# Define vulnerability factors based on literature [1,3](@ref)
+profile.all_clean <- profile.all_clean %>%
+  mutate(
+    # Age vulnerability (extremes more vulnerable)
+    age_vuln = case_when(
+      age < 18 | age > 65 ~ 2,  # Higher weight for vulnerable age groups
+      age >= 18 & age <= 65 ~ 1,
+      TRUE ~ NA_real_
+    ),
+    
+    # Socioeconomic status (composite of income and education)
+    ses_vuln = case_when(
+      income < 30000 & `education` == "Below bachelor" ~ 3,
+      income < 30000 ~ 2,
+      `education` == "Below bachelor" ~ 2,
+      TRUE ~ 1
+    ),
+    
+    # Race/ethnicity vulnerability (based on disparities) [3](@ref)
+    race_vuln = case_when(
+      race %in% c("black", "other") ~ 2,
+      TRUE ~ 1
+    ),
+    
+    # Residential vulnerability [4](@ref)
+    res_vuln = case_when(
+      residence == "rural" ~ 3,  # Rural areas often have less infrastructure
+      residence == "suburb" ~ 2,
+      TRUE ~ 1
+    ),
+    
+    # Health proxy (marital status as proxy for social isolation)
+    health_vuln = case_when(
+      `marital_status` %in% c("widowed", "divorced") ~ 2,
+      TRUE ~ 1
+    )
+  )
+```
+
+
+```{r}
+# Method 1: Weighted sum (transparent approach) [1](@ref)
+weights <- c(
+  age = 0.25,
+  ses = 0.30,
+  race = 0.15,
+  res = 0.20,
+  health = 0.10
+)
+
+profile.all_clean <- profile.all_clean %>%
+  mutate(
+    HVI_weighted = (age_vuln * weights['age'] + 
+                     ses_vuln * weights['ses'] + 
+                     race_vuln * weights['race'] + 
+                     res_vuln * weights['res'] + 
+                     health_vuln * weights['health'])
+  )
+
+# Method 2: PCA for data-driven weights [1,2](@ref)
+pca_vars <- profile.all_clean %>% 
+  select(age_vuln, ses_vuln, race_vuln, res_vuln, health_vuln) %>%
+  scale()
+
+pca_result <- prcomp(pca_vars, center = TRUE, scale. = TRUE)
+profile.all$HVI_pca <- predict(pca_result)[,1]  # First principal component
+```
+
+
+```{r}
+# Classify vulnerability levels [1](@ref)
+profile.all_clean <- profile.all_clean %>%
+  mutate(
+    HVI_class = case_when(
+      HVI_weighted > quantile(HVI_weighted, 0.9) ~ "Extreme",
+      HVI_weighted > quantile(HVI_weighted, 0.7) ~ "High",
+      HVI_weighted > quantile(HVI_weighted, 0.3) ~ "Moderate",
+      TRUE ~ "Low"
+    )
+  )
+
+profile.all_clean$HVI_class <- factor(profile.all_clean$HVI_class, levels = c("Low", "Moderate", "High", "Extreme"))
+
+# Visualize distribution
+library(ggplot2)
+ggplot(profile.all_clean, aes(x = HVI_weighted, fill = HVI_class)) +
+  geom_histogram(bins = 30) +
+  ggsci::scale_color_lancet()  +
+  labs(title = "Heat Vulnerability Index Distribution",
+       x = "HVI Score", 
+       y = "Count") +
+  theme_minimal()
+
+ggplot(profile.all_clean, aes(x = HVI_class, y = HVI_weighted, fill = HVI_class)) +
+  geom_violin(trim = FALSE, 
+              alpha = 0.7,          # Semi-transparent fill
+              width = 0.9,          # Control width
+              adjust = 1.5) +       # Smoother density [4](@ref)
+  geom_boxplot(width = 0.15,        # Add boxplot inside
+               fill = "white",      # Contrast color
+               outlier.shape = NA) + # Hide outliers [8](@ref)
+  stat_summary(fun = "median",      # Highlight median
+               geom = "point", 
+               shape = 21, 
+               size = 3, 
+               color = "black") +
+  ggsci::scale_fill_lancet() +
+  labs(title = "Heat Vulnerability Index Distribution",
+       subtitle = "Violin width shows probability density",
+       x = "Vulnerability Class", 
+       y = "HVI Score") +
+  theme_minimal() +
+  theme(legend.position = "none")  # Remove redundant legend
+```
+
+
+## Table 1
+```{r}
+library(table1)
+
+table1(~ age + race + education + occupation + skill + consumption + income + residence + personality + religion + marital_status + HVI_class | gender, data=profile.all_clean)
+
+```
+
+
+
+
+# Load status data
+```{r}
+# Load required libraries
+library(dplyr)
+library(tidyr)
+library(jsonlite)
+library(stringr)
+
+status1 <- read.csv("/Users/yingdai/Desktop/AgentSociety/Results/output0628/status1.csv", stringsAsFactors = FALSE) %>% dplyr::filter(id > 4) 
+
+# Function to parse the status JSON string
+parse_status <- function(status_str) {
+  # 替换所有转义的双引号为普通双引号，并移除多余的转义符
+  clean_str <- str_replace_all(status_str, '\\\\"', '"')  # 处理转义符
+  clean_str <- str_replace_all(clean_str, '^"|"$', '')    # 移除首尾的双引号
+  
+  # 安全解析JSON
+  tryCatch({
+    parsed <- fromJSON(clean_str, simplifyDataFrame = FALSE)
+    # 转换为数据框，处理可能的NULL值
+    as.data.frame(lapply(parsed, function(x) if (is.null(x)) NA else x))
+  }, error = function(e) {
+    data.frame(error = paste("JSON解析失败:", e$message))  # 返回错误信息列
+  })
+}
+
+
+# Parse the status column and join with original data
+status1_parsed <- bind_rows(lapply(status1$status, parse_status))
+status1 <- bind_cols(status1, status1_parsed) %>% select(-status) 
+
+status2 <- read.csv("/Users/yingdai/Desktop/AgentSociety/Results/output0628/status2.csv", stringsAsFactors = FALSE)
+
+# Parse the status column and join with original data
+status2_parsed <- bind_rows(lapply(status2$status, parse_status))
+status2 <- bind_cols(status2, status2_parsed) %>% select(-status) 
+
+status_all <- rbind(status1, status2)
+
+
+status_all <- status_all %>% dplyr::mutate_if(is.character, as.factor)
+str(status_all)
+
+```
+
+## Table 2
+
+```{r}
+table1(~ hungry + tired + safe + social + sadness + joy + fear + disgust + anger + surprise + emotion_types | day, data=status_all)
+
+```
+
+
+```{r}
+table1(~ hungry + tired + safe + social + current_need + intention | day, data=status_all)
+
+```
+
+
+
+## Extract action
+```{r}
+status_action <- status_all %>% select(id, day, action)
+#write.csv(status_action,"/Users/yingdai/Desktop/AgentSociety/Results/output0628.csv", row.names = T)
+
+# Define the recoding rules
+status_action <- status_action %>%
+  mutate(action_category = case_when(
+    # Work Preparation and Execution
+    grepl("prepare.*work|set up.*workspace|check.*tasks|work|teaching|operations|business|professional|tasks|projects|review|duties|meeting|meetings|colleagues|clients|start working|start remote|check.*emails|Conduct classes as per schedule|Set alarm for next day|Gather necessary art materials|Set alarm", action, ignore.case = TRUE) ~ "Work Preparation and Execution",
+
+    # Shopping Related
+    grepl("shop|store|market|purchase|buy|list.*items|payment|products|Pay for chosen items", action, ignore.case = TRUE) ~ "Shopping",
+    
+    # Self Care
+    grepl("breakfast|exercise|shower|dress|break|refresh|bed|meal|rest|ingredients|dining|lights|cook|eating|nap|sleep|comfortable|Relax|desired|preferred|Brush teeth", action, ignore.case = TRUE) ~ "Self Care",
+    
+    # Travel/Commute
+    grepl("travel|commute|go to|move to|Return home from current location|Prepare necessary belongings", action, ignore.case = TRUE) ~ "Travel",
+    
+    # Heatwave Related (currently empty in sample data)
+    grepl("heat|hot|cool|water|shade|fan|AC|air conditioning|avoid sun|room temperature|sunlight exposure|block sunlight|hydration", action, ignore.case = TRUE) ~ "Heatwave Response",
+    
+    # Default category
+    TRUE ~ "Other"
+  ))
+
+# Optional: Convert to factor with specific level ordering
+status_action$action_category <- factor(status_action$action_category, 
+                            levels = c("Work Preparation and Execution", 
+                                      "Shopping", "Self Care", "Travel",
+                                      "Heatwave Response", "Other"))
+
+# View the distribution
+table(status_action$action_category)
+
+# For better visualization
+ggplot(status_action, aes(x = action_category)) +
+  geom_bar() +
+  labs(title = "Distribution of Action Categories", x = "Category", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Action plot
+```{r}
+status_action %>%
+  count(day, action_category) %>%
+  ggplot(aes(x = day, y = n, color = action_category)) + 
+  geom_vline(xintercept = c(2, 7), linetype = "dashed", color = "gray40", linewidth = 0.5) +
+  
+  # Add phase labels using annotate()
+  ggplot2::annotate("text", x = 1, y = 3900, label = "Baseline", size = 3.5, color = "gray30") +
+  ggplot2::annotate("text", x = 4.5, y = 3900, label = "Heatwave", size = 3.5, color = "gray30") +
+  ggplot2::annotate("text", x = 9.5, y = 3900, label = "Recovery", size = 3.5, color = "gray30") +
+  geom_line(linewidth = 1) +
+  ggsci::scale_color_lancet()  + # Lancet palette
+  labs(title = "Daily Actions Across Time",
+       x = "Day", y = "Count",
+       color = "Action Type") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+
+
+
+
+
+## Heatwave related action word cloud
+### Heatwave action word cloud
+```{r}
+# Load required packages
+library(tm)          # Text mining
+library(wordcloud)   # Word cloud generation
+library(RColorBrewer) # Color palettes
+library(dplyr)       # Data manipulation
+
+# 1. Data Preparation ------------------------------------------------------
+# Filter heatwave-related actions (assuming you've already categorized them)
+heatwave_actions <- status_action %>% 
+  filter(action_category == "Heatwave Response") %>% 
+  pull(action) %>% 
+  as.character()
+
+# 2. Text Preprocessing ---------------------------------------------------
+# Create a text corpus
+docs <- Corpus(VectorSource(heatwave_actions)) %>%
+  # Standard preprocessing pipeline
+  tm_map(content_transformer(tolower)) %>%       # Convert to lowercase
+  tm_map(removeNumbers) %>%                       # Remove numbers
+  tm_map(removePunctuation) %>%                   # Remove punctuation
+  tm_map(removeWords, stopwords("english")) %>%   # Remove English stopwords
+  tm_map(stripWhitespace)                         # Remove extra whitespace
+
+# Optional: Add custom stopwords specific to your context
+custom_stopwords <- c("action", "related", "during") # Add context-specific words
+docs <- tm_map(docs, removeWords, custom_stopwords)
+
+# 3. Term-Document Matrix -------------------------------------------------
+dtm <- TermDocumentMatrix(docs)
+m <- as.matrix(dtm)
+v <- sort(rowSums(m), decreasing = TRUE)
+word_freq <- data.frame(word = names(v), freq = v)
+
+# 4. Word Cloud Generation ------------------------------------------------
+set.seed(1234) # For reproducibility
+
+# Basic word cloud
+wordcloud(words = word_freq$word, 
+          freq = word_freq$freq,
+          min.freq = 1,          # Minimum word frequency to display
+          max.words = 100,      # Maximum number of words
+          random.order = FALSE, # Frequent words in center
+          rot.per = 0.35,       # Proportion of vertical words
+          colors = brewer.pal(8, "Dark2"),
+          scale = c(3.5, 0.25)) # Size range
+
+# 5. Enhanced Version with Heatwave-Specific Styling ---------------------
+png("heatwave_wordcloud.png", width = 800, height = 800, res = 300) # Save as high-res PNG
+
+wordcloud(words = word_freq$word, 
+          freq = word_freq$freq,
+          min.freq = 2,
+          max.words = 150,
+          random.order = FALSE,
+          rot.per = 0.25,
+          colors = c("#D1352C", "#F08533", "#3B78B0"), # Heatwave-appropriate colors
+          ordered.colors = FALSE,
+          scale = c(4, 0.5),
+          main = "Heatwave-Related Actions Word Cloud")
+
+dev.off()
+
+# 6. Alternative: Using wordcloud2 for Interactive Plots -------------------
+# install.packages("wordcloud2") # Uncomment to install
+library(wordcloud2)
+
+wordcloud2(word_freq, 
+           size = 0.8,
+           color = "random-dark",
+           backgroundColor = "white",
+           shape = "circle")
+
+# Save as temporary HTML
+#saveWidget(wc, "temp_wc.html", selfcontained = FALSE)
+
+# Convert to PNG/PDF (requires PhantomJS)
+#webshot::install_phantomjs()  # Only needed once
+#webshot("temp_wc.html", "wordcloud.png", 
+#        delay = 5,           # Wait for rendering
+#        vwidth = 1000,       # Width in pixels
+#        vheight = 800)       # Height in pixels
+
+# Clean up
+#file.remove("temp_wc.html")
+```
+
+### Self care word cloud
+```{r}
+# Filter heatwave-related actions (assuming you've already categorized them)
+selfcare_actions <- status_action %>% 
+  filter(action_category == "Self Care") %>% 
+  pull(action) %>% 
+  as.character()
+
+# 2. Text Preprocessing ---------------------------------------------------
+# Create a text corpus
+docs <- Corpus(VectorSource(selfcare_actions)) %>%
+  # Standard preprocessing pipeline
+  tm_map(content_transformer(tolower)) %>%       # Convert to lowercase
+  tm_map(removeNumbers) %>%                       # Remove numbers
+  tm_map(removePunctuation) %>%                   # Remove punctuation
+  tm_map(removeWords, stopwords("english")) %>%   # Remove English stopwords
+  tm_map(stripWhitespace)                         # Remove extra whitespace
+
+# Optional: Add custom stopwords specific to your context
+custom_stopwords <- c("action", "related", "during") # Add context-specific words
+docs <- tm_map(docs, removeWords, custom_stopwords)
+
+# 3. Term-Document Matrix -------------------------------------------------
+dtm <- TermDocumentMatrix(docs)
+m <- as.matrix(dtm)
+v <- sort(rowSums(m), decreasing = TRUE)
+word_freq <- data.frame(word = names(v), freq = v)
+
+# 4. Word Cloud Generation ------------------------------------------------
+set.seed(1234) # For reproducibility
+
+# Basic word cloud
+wordcloud(words = word_freq$word, 
+          freq = word_freq$freq,
+          min.freq = 1,          # Minimum word frequency to display
+          max.words = 100,      # Maximum number of words
+          random.order = FALSE, # Frequent words in center
+          rot.per = 0.35,       # Proportion of vertical words
+          colors = brewer.pal(8, "Dark2"),
+          scale = c(3.5, 0.25)) # Size range
+
+
+
+# 5. Enhanced Version with Heatwave-Specific Styling ---------------------
+png("heatwave_wordcloud.png", width = 800, height = 800, res = 300) # Save as high-res PNG
+
+wordcloud(words = word_freq$word, 
+          freq = word_freq$freq,
+          min.freq = 2,
+          max.words = 150,
+          random.order = FALSE,
+          rot.per = 0.25,
+          colors = c("#D1352C", "#F08533", "#3B78B0"), # Heatwave-appropriate colors
+          ordered.colors = FALSE,
+          scale = c(4, 0.5),
+          main = "Heatwave-Related Actions Word Cloud")
+
+dev.off()
+
+# 6. Alternative: Using wordcloud2 for Interactive Plots -------------------
+# install.packages("wordcloud2") # Uncomment to install
+library(wordcloud2)
+
+wordcloud2(word_freq, 
+           size = 0.8,
+           color = "random-dark",
+           backgroundColor = "white",
+           shape = "circle")
+
+# Save as temporary HTML
+#saveWidget(wc, "temp_wc.html", selfcontained = FALSE)
+
+# Convert to PNG/PDF (requires PhantomJS)
+#webshot::install_phantomjs()  # Only needed once
+#webshot("temp_wc.html", "wordcloud.png", 
+#        delay = 5,           # Wait for rendering
+#        vwidth = 1000,       # Width in pixels
+#        vheight = 800)       # Height in pixels
+
+# Clean up
+#file.remove("temp_wc.html")
+
+```
+
+```{r}
+library(ggpubr)
+library(ggplot2)
+library(png)
+library(grid)
+
+# 1. Read images
+img1 <- readPNG("/Users/yingdai/Desktop/AgentSociety/Results/AgentSociety/Heatwave response word cloud.png")
+img2 <- readPNG("/Users/yingdai/Desktop/AgentSociety/Results/AgentSociety/Selfcare word cloud.png")
+
+# 2. Convert to ggplot objects
+plot1 <- ggplot() + 
+  background_image(img1) + 
+  theme_void() 
+
+plot2 <- ggplot() + 
+  background_image(img2) + 
+  theme_void() 
+
+# 3. Arrange plots with labels [5](@ref)
+combined <- ggarrange(plot1, plot2, 
+                     ncol = 2, 
+                     labels = c("A", "B"),  # Explicit labels
+                     label.x = 0.05,       # Left-aligned labels
+                     label.y = 0.95,       # Top position
+                     font.label = list(size = 10, face = "bold"))
+
+# 4. Save output
+#ggsave("combined_figures.png", combined, 
+#       width = 12, height = 4, dpi = 300)
+
+```
+
+
+## Vulnerability and action
+```{r}
+profile.all_clean_sub <- profile.all_clean %>% dplyr::select(id, HVI_class)
+
+status_action <- merge(status_action, profile.all_clean_sub, all.x=TRUE, by="id")
+
+# Revised plot with HVI_class grouping and improved aesthetics
+ggplot(status_action, aes(x = action_category, fill = HVI_class)) +
+  geom_bar(position = "dodge", color = "black") +  # Grouped bars with black outline
+  labs(title = "Distribution of Action Categories by Health Vulnerability Class",
+       x = "Action Category", 
+       y = "Count",
+       fill = "Vulnerability Class") +
+  scale_fill_brewer(palette = "Set2") +  # Color-blind friendly palette
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        legend.position = "top") +
+  facet_wrap(~HVI_class, ncol = 2)  # Optional: Add facets for clearer class comparison
+```
+
+
+
+
+## Needs status plot
+```{r}
+library(tidyverse)
+library(lubridate)
+
+# Plot satisfaction metrics (0-1 scale) with loess smoothing
+sat_metrics <- c("hungry", "tired", "safe", "social")
+
+ggplot(status_all, aes(x = day)) +
+  geom_smooth(aes(y = hungry, color = "Hungry"), 
+              method = "loess", span = 0.3, se = F) +
+  geom_smooth(aes(y = tired, color = "Tired"), 
+              method = "loess", span = 0.3, se = F) +
+  geom_smooth(aes(y = safe, color = "Safe"), 
+              method = "loess", span = 0.3, se = F) +
+  geom_smooth(aes(y = social, color = "Social"), 
+              method = "loess", span = 0.3, se = F) +
+  scale_x_continuous(breaks = 0:12) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_color_manual(values = c("Hungry" = "#E41A1C", 
+                               "Tired" = "#377EB8",
+                               "Safe" = "#4DAF4A", 
+                               "Social" = "#984EA3")) +
+  labs(title = "Daily Physiological and Psychological Needs Status across Time",
+       x = "Day",
+       y = "Score (0-1)",
+       color = "Metric") +
+  theme_minimal() +
+  theme(legend.position = "bottom") 
+
+```
+
+
+## Emotion intensity and type plot
+```{r}
+library(ggsci) # Contains Lancet color palettes
+
+# 1. For Emotion Intensity Metrics (sadness, joy, fear, disgust, anger, surprise)
+intensity_plot <- ggplot(status_all, aes(x = day)) +
+  # Add vertical lines for phase boundaries
+  geom_vline(xintercept = c(2, 7), linetype = "dashed", color = "gray40", linewidth = 0.5) +
+  
+  # Add phase labels using annotate()
+  ggplot2::annotate("text", x = 1, y = 10, label = "Baseline", size = 3.5, color = "gray30") +
+  ggplot2::annotate("text", x = 4.5, y = 10, label = "Heatwave", size = 3.5, color = "gray30") +
+  ggplot2::annotate("text", x = 9.5, y = 10, label = "Recovery", size = 3.5, color = "gray30") +
+  
+  # Original smoothed lines
+  geom_smooth(aes(y = sadness, color = "Sadness"), 
+              method = "loess", span = 0.3, se = FALSE) +
+  geom_smooth(aes(y = joy, color = "Joy"), 
+              method = "loess", span = 0.3, se = FALSE) +
+  geom_smooth(aes(y = fear, color = "Fear"), 
+              method = "loess", span = 0.3, se = FALSE) +
+  geom_smooth(aes(y = disgust, color = "Disgust"), 
+              method = "loess", span = 0.3, se = FALSE) +
+  geom_smooth(aes(y = anger, color = "Anger"), 
+              method = "loess", span = 0.3, se = FALSE) +
+  geom_smooth(aes(y = surprise, color = "Surprise"), 
+              method = "loess", span = 0.3, se = FALSE) +
+  
+  # Color scale only (no axis scaling)
+  scale_color_lancet() +
+  labs(title = "Emotion Intensity Trends",
+       x = "Day",
+       y = "Intensity Score",
+       color = "Emotion") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.margin = margin(10, 10, 10, 10))
+
+# 2. For Emotion Types (using fill colors)
+# Get the Lancet palette with enough colors (extended version)
+lancet_pal <- pal_lancet("lanonc")(9)  # Base palette has 9 colors
+lancet_pal_extended <- colorRampPalette(lancet_pal)(13)  # Extend to 13 colors
+
+type_plot <- status_all %>%
+  count(day, emotion_types) %>%
+  ggplot(aes(x = day, y = n, fill = emotion_types)) +
+  # Add vertical lines for phase boundaries
+  geom_vline(xintercept = c(2, 7), linetype = "dashed", color = "gray40", linewidth = 0.5) +
+  
+  # Add phase labels using annotate()
+  ggplot2::annotate("text", x = 1, y = 1.05, label = "Baseline", size = 3.5, color = "gray30") +
+  ggplot2::annotate("text", x = 4.5, y = 1.05, label = "Heatwave", size = 3.5, color = "gray30") +
+  ggplot2::annotate("text", x = 9.5, y = 1.05, label = "Recovery", size = 3.5, color = "gray30") +
+  
+  # Original area plot
+  geom_bar(stat = "identity", position = "fill") +
+  
+  # Fill scale only (no axis scaling)
+  scale_fill_manual(values = lancet_pal_extended) +
+  labs(title = "Emotion Type Distribution",
+       x = "Day",
+       y = "Proportion",
+       fill = "Emotion Type") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        plot.margin = margin(10, 10, 10, 10))
+
+# Display both plots
+intensity_plot
+type_plot
+```
+
+
+
+
+# Load satisfaction data
+```{r}
+satisfaction <- read.csv("/Users/yingdai/Desktop/AgentSociety/Results/output0628/satisfaction.csv")
+names(satisfaction)
+#overall <- type.convert(overall, as.is=FALSE)
+satisfaction <- satisfaction %>% dplyr::mutate_if(is.character, as.factor)
+str(satisfaction)
+summary(satisfaction$step)
+```
+
+
+```{r}
+# mutate days based on step: each step represent 2 hours
+satisfaction <- satisfaction %>%
+  mutate(phase = case_when(
+      step <= 36 ~ "Baseline",
+      step > 36 & step <= 96 ~ "Heatwave",
+      step > 96 ~ "Recovery"
+    ),
+    phase = factor(phase, levels = c("Baseline", "Heatwave", "Recovery"))
+  )
+library(table1)
+
+table1(~ value | type, data=satisfaction)
+
+table1(~value | type + phase, data = satisfaction)
+```
+
+## Trend plot
+```{r}
+# Load required packages
+library(tidyverse)
+library(patchwork)
+library(NLP)
+
+# Data processing
+df <- satisfaction %>%
+  mutate(phase = case_when(
+    step <= 36 ~ "Baseline (Days 0-2)",
+    step <= 96 ~ "Heatwave (Days 3-7)",
+    TRUE ~ "Recovery (Days 8-12)"
+  )) %>%
+  mutate(phase = factor(phase, levels = c("Baseline (Days 0-2)", 
+                                          "Heatwave (Days 3-7)", 
+                                          "Recovery (Days 8-12)")))
+
+# Calculate daily averages (each day has 12 steps)
+daily_data <- df %>%
+  mutate(day = floor(step/12)) %>%
+  group_by(type, day, phase) %>%
+  summarise(mean_value = mean(value, na.rm = TRUE),
+            sd_value = sd(value, na.rm = TRUE),
+            .groups = "drop")
+
+# Create visualization for social satisfaction
+social_plot <- daily_data %>%
+  filter(type == "social-satisfaction") %>%
+  ggplot(aes(x = day, y = mean_value)) +
+  geom_ribbon(aes(ymin = pmax(0, mean_value - sd_value), 
+                  ymax = pmin(1, mean_value + sd_value)),
+              fill = "#1f78b4", alpha = 0.2) +
+  geom_line(color = "#1f78b4", linewidth = 1) +
+  geom_point(color = "#1f78b4", size = 2) +
+  scale_x_continuous(breaks = 0:12, limits = c(0, 13)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(title = "Social Satisfaction Trend",
+       x = "Simulation Day",
+       y = "Satisfaction Level (0-1)",
+       color = "Phase") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank()) +
+  ggplot2::annotate("text", x = 1, y = 0.8, label = "Baseline", hjust = 0.5, size = 3) +
+  ggplot2::annotate("text", x = 4.5, y = 0.8, label = "Heatwave", hjust = 0.5, size = 3) +
+  ggplot2::annotate("text", x = 10, y = 0.8, label = "Recovery", hjust = 0.5, size = 3) +
+  geom_vline(xintercept = c(2, 7), linetype = "dashed", color = "gray50")
+
+# Create visualization for hunger satisfaction
+hunger_plot <- daily_data %>%
+  filter(type == "hunger-satisfaction") %>%
+  ggplot(aes(x = day, y = mean_value)) +
+  geom_ribbon(aes(ymin = pmax(0, mean_value - sd_value), 
+                  ymax = pmin(1, mean_value + sd_value)),
+              fill = "#33a02c", alpha = 0.2) +
+  geom_line(color = "#33a02c", linewidth = 1) +
+  geom_point(color = "#33a02c", size = 2) +
+  scale_x_continuous(breaks = 0:12, limits = c(0, 13)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(title = "Hunger Satisfaction Trend",
+       x = "Simulation Day",
+       y = "Satisfaction Level (0-1)") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank()) +
+  geom_vline(xintercept = c(2, 7), linetype = "dashed", color = "gray50")
+
+# Create visualization for safety satisfaction
+safety_plot <- daily_data %>%
+  filter(type == "safety-satisfaction") %>%
+  ggplot(aes(x = day, y = mean_value)) +
+  geom_ribbon(aes(ymin = pmax(0, mean_value - sd_value), 
+                  ymax = pmin(1, mean_value + sd_value)),
+              fill = "#e31a1c", alpha = 0.2) +
+#  geom_smooth(method=loess, color="red", fill="#69b3a2", se=TRUE) +
+  geom_line(color = "#e31a1c", linewidth = 1) +
+  geom_point(color = "#e31a1c", size = 2) +
+  scale_x_continuous(breaks = 0:12, limits = c(0, 13)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(title = "Safety Satisfaction Trend",
+       x = "Simulation Day",
+       y = "Satisfaction Level (0-1)") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"),
+        panel.grid.minor = element_blank()) +
+  geom_vline(xintercept = c(2, 7), linetype = "dashed", color = "gray50")
+
+# Combine all plots
+combined_plot <- social_plot / hunger_plot / safety_plot +
+  plot_annotation(title = "Heatwave Impact on Satisfaction Metrics",
+                  subtitle = "13-Day Simulation with Baseline (Days 0-2), Heatwave (Days 3-7), and Recovery (Days 8-12) Phases",
+                  theme = theme(plot.title = element_text(size = 16, face = "bold"),
+                                plot.subtitle = element_text(size = 12)))
+
+# Display the plot
+combined_plot
+```
+
+
+```{r}
+# Calculate time parameters
+total_hours <- 306  # 13 days
+hours_per_step <- total_hours / 153
+start_time <- as.POSIXct("2025-06-15 00:00:00")
+
+# Read and preprocess data
+df <- satisfaction %>%
+  dplyr::mutate(
+    timestamp = start_time + seconds(step * hours_per_step * 3600),
+    day = floor_date(timestamp, "day"),
+    hour_group = cut(hour(timestamp), breaks = c(0, 6, 12, 18, 24), 
+                     labels = c("Night", "Morning", "Afternoon", "Evening"))
+  ) 
+
+# Convert your annotation x-coordinates to POSIXct (match your timestamp column's format)
+baseline_date <- min(df$timestamp) + days(1)  # Adjust days() as needed
+heatwave_date <- min(df$timestamp) + days(5)
+recovery_date <- min(df$timestamp) + days(10)
+
+
+# 3-day trend visualization
+ggplot(df, aes(x = timestamp, y = value, color = type)) +
+  geom_smooth(method = "loess", span = 0.2, se = T) +
+  scale_x_datetime(date_labels = "%b %d", date_breaks = "1 day") +
+  facet_wrap(~type, ncol = 1) +
+  labs(
+    title = "13-Day Satisfaction Trend Analysis (153 Steps)",
+    x = "Timeline",
+    y = "Satisfaction Level",
+    color = "Metric",
+    shape = "Time of Day"
+  ) +
+  theme_minimal(base_size = 10) +
+  # Adjusted annotations for unscaled x-axis (now using day numbers directly)
+  ggplot2::annotate("text", 
+           x = baseline_date,  # Day number instead of POSIXct
+           y = 0.8,  # Dynamic position based on data range
+           label = "Baseline", 
+           hjust = 0.5, 
+           size = 3) +
+  ggplot2::annotate("text", 
+           x = heatwave_date, 
+           y = 0.8, 
+           label = "Heatwave", 
+           hjust = 0.5, 
+           size = 3) +
+  ggplot2::annotate("text", 
+           x = recovery_date, 
+           y = 0.8, 
+           label = "Recovery", 
+           hjust = 0.5, 
+           size = 3) +
+  # Vertical lines using day numbers
+  geom_vline(
+    xintercept = c(min(df$timestamp) + days(2), 
+                   min(df$timestamp) + days(7)),
+    linetype = "dashed", 
+    color = "gray50"
+  )
+
+```
+
+
+
+# Vulnerability and status
+```{r}
+profile.all_clean_sub <- profile.all_clean %>% dplyr::select(id, HVI_class)
+
+status_all_sub <- merge(status_all, profile.all_clean_sub, all.x=TRUE, by="id")
+```
+
+
+## Mixed linear modeling
+### Hungry
+```{r warning=FALSE}
+library(lme4)       # For mixed models
+library(lmerTest)   # For p-values
+library(tidyverse)  # Data manipulation
+
+model1.hungry <- lmer(hungry ~ day * HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1.hungry)
+```
+
+
+
+```{r}
+model2 <- lmer(hungry ~ day*HVI_class + (1 + day | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model2)
+```
+
+
+```{r}
+anova(model1.hungry, model2)  # Likelihood ratio test to choose the better model
+```
+
+
+```{r}
+# Pairwise comparisons between HVI classes at specific time points
+library(emmeans)
+
+# At Time = 0 (baseline)
+emmeans(model2, pairwise ~ HVI_class, at = list(day = 0))
+
+# At Time = 12 (final time point)
+emmeans(model2, pairwise ~ HVI_class, at = list(day = 12))
+
+# Slope comparisons (difference in trends)
+emtrends(model2, pairwise ~ HVI_class, var = "day")
+```
+
+#### Visualization
+```{r}
+library(ggplot2)
+
+# Plot trajectories by HVI class
+p1 <- ggplot(status_all_sub, aes(x = day, y = hungry, color = HVI_class, group = id)) +
+  #geom_line(alpha = 0.2) +  # Individual trajectories
+  stat_summary(aes(group = HVI_class), fun = mean, geom = "line", size = 1.5) +  # Group means
+  labs(title = "Hungry Needs Satisfaction Trajectories by Vulnerability Class",
+       x = "Time (days)", 
+       y = "Hungry Needs Satisfaction Score",
+       color = "Vulnerability") +
+  theme_minimal()
+p1
+```
+
+
+
+
+
+### Safe
+```{r warning=FALSE}
+library(lme4)       # For mixed models
+library(lmerTest)   # For p-values
+library(tidyverse)  # Data manipulation
+
+model1.safe <- lmer(safe ~ day * HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1.safe)
+
+model1a <- lmer(safe ~ day + HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1a)
+```
+
+
+
+```{r}
+model2 <- lmer(safe ~ day*HVI_class + (1 + day | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model2)
+```
+
+
+```{r}
+anova(model1.safe, model2)  # Likelihood ratio test to choose the better model
+```
+
+
+```{r}
+# Pairwise comparisons between HVI classes at specific time points
+library(emmeans)
+
+# At Time = 0 (baseline)
+emmeans(model2, pairwise ~ HVI_class, at = list(day = 0))
+
+# At Time = 12 (final time point)
+emmeans(model2, pairwise ~ HVI_class, at = list(day = 12))
+
+# Slope comparisons (difference in trends)
+emtrends(model2, pairwise ~ HVI_class, var = "day")
+```
+
+
+#### visualization
+```{r}
+library(ggplot2)
+
+# Plot trajectories by HVI class
+p2 <- ggplot(status_all_sub, aes(x = day, y = safe, color = HVI_class, group = id)) +
+  #geom_line(alpha = 0.2) +  # Individual trajectories
+  stat_summary(aes(group = HVI_class), fun = mean, geom = "line", size = 1.5) +  # Group means
+  labs(title = "Safe Needs Satisfaction Trajectories by Vulnerability Class",
+       x = "Time (days)", 
+       y = "Safe Needs Satisfaction Score",
+       color = "Vulnerability") +
+  theme_minimal()
+p2
+```
+
+
+
+
+### Social
+```{r warning=FALSE}
+library(lme4)       # For mixed models
+library(lmerTest)   # For p-values
+library(tidyverse)  # Data manipulation
+
+model1.social <- lmer(social ~ day * HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1.social)
+
+model1a <- lmer(social ~ day + HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1a)
+```
+
+
+
+#### visualization
+```{r}
+library(ggplot2)
+
+# Plot trajectories by HVI class
+p3 <- ggplot(status_all_sub, aes(x = day, y = social, color = HVI_class, group = id)) +
+ # geom_line(alpha = 0.2) +  # Individual trajectories
+  stat_summary(aes(group = HVI_class), fun = mean, geom = "line", size = 1.5) +  # Group means
+  labs(title = "Social Needs Satisfaction Trajectories by Vulnerability Class",
+       x = "Time (days)", 
+       y = "Social Needs Satisfaction Score",
+       color = "Vulnerability") +
+  theme_minimal()
+p3
+```
+
+
+
+
+### Tired
+```{r warning=FALSE}
+library(lme4)       # For mixed models
+library(lmerTest)   # For p-values
+library(tidyverse)  # Data manipulation
+
+model1.tired <- lmer(tired ~ day * HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1.tired)
+
+model1a <- lmer(tired ~ day + HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1a)
+```
+
+
+
+
+#### visualization
+```{r}
+library(ggplot2)
+
+# Plot trajectories by HVI class
+p4 <- ggplot(status_all_sub, aes(x = day, y = tired, color = HVI_class, group = id)) +
+  #geom_line(alpha = 0.2) +  # Individual trajectories
+  stat_summary(aes(group = HVI_class), fun = mean, geom = "line", size = 1.5) +  # Group means
+  labs(title = "Tired Needs Satisfaction Trajectories by Vulnerability Class",
+       x = "Time (days)", 
+       y = "Tired Need Satisfaction Score",
+       color = "Vulnerability") +
+  theme_minimal()
+p4
+```
+
+
+### Combined daily needs plot
+```{r}
+#library(cowplot)
+#combined <- plot_grid(p1, p2, p3, p4,
+#                     ncol = 2, 
+#                     labels = c("A", "B", "C", "D"),
+#                     label_size = 10,
+                     #align = 'h',  # Horizontal alignment
+#                     rel_widths = c(1, 1))  # Equal width columns
+#combined
+#ggsave("combined_figures.png", combined, 
+#       width = 20, height = 10, units = "in", dpi = 300)
+
+library(gridExtra)
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+
+### Combined mixed model output
+```{r}
+library(jtools)
+export_summs(model1.hungry, model1.safe, model1.social, model1.tired, scale = TRUE)
+
+#library(sjPlot)
+#tab_model(model1.hungry, model1.safe, model1.social, model1.tired)
+```
+
+
+
+### Surprise
+```{r warning=FALSE}
+library(lme4)       # For mixed models
+library(lmerTest)   # For p-values
+library(tidyverse)  # Data manipulation
+
+model1.surprise <- lmer(surprise ~ day * HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1.surprise)
+
+model1a <- lmer(surprise ~ day + HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1a)
+```
+
+
+
+#### visualization
+```{r}
+library(ggplot2)
+
+# Plot trajectories by HVI class
+p5 <- ggplot(status_all_sub, aes(x = day, y = surprise, color = HVI_class, group = id)) +
+ # geom_line(alpha = 0.2) +  # Individual trajectories
+  stat_summary(aes(group = HVI_class), fun = mean, geom = "line", size = 1.5) +  # Group means
+  ggsci::scale_color_lancet()  +
+  labs(title = "A. Surprise Emotion Trajectories by Vulnerability Class",
+       x = "Time (days)", 
+       y = "Surprise Emotion Score",
+       color = "Vulnerability") +
+  theme_minimal()
+p5
+```
+
+
+### joy
+```{r warning=FALSE}
+library(lme4)       # For mixed models
+library(lmerTest)   # For p-values
+library(tidyverse)  # Data manipulation
+
+model1.joy <- lmer(joy ~ day * HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1.joy)
+
+model1a <- lmer(joy ~ day + HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1a)
+```
+
+
+
+#### visualization
+```{r}
+library(ggplot2)
+
+# Plot trajectories by HVI class
+p6 <- ggplot(status_all_sub, aes(x = day, y = joy, color = HVI_class, group = id)) +
+ # geom_line(alpha = 0.2) +  # Individual trajectories
+  stat_summary(aes(group = HVI_class), fun = mean, geom = "line", size = 1.5) +  # Group means
+  ggsci::scale_color_lancet()  +
+  labs(title = "B. Joy Emotion Trajectories by Vulnerability Class",
+       x = "Time (days)", 
+       y = "Joy Emotion Score",
+       color = "Vulnerability") +
+  theme_minimal()
+p6
+```
+
+
+### fear
+```{r warning=FALSE}
+library(lme4)       # For mixed models
+library(lmerTest)   # For p-values
+library(tidyverse)  # Data manipulation
+
+model1.fear <- lmer(fear ~ day * HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1.fear)
+
+model1a <- lmer(fear ~ day + HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1a)
+```
+
+
+
+#### visualization
+```{r}
+library(ggplot2)
+
+# Plot trajectories by HVI class
+p7 <- ggplot(status_all_sub, aes(x = day, y = fear, color = HVI_class, group = id)) +
+ # geom_line(alpha = 0.2) +  # Individual trajectories
+  stat_summary(aes(group = HVI_class), fun = mean, geom = "line", size = 1.5) +  # Group means
+  ggsci::scale_color_lancet()  +
+  labs(title = "C. Fear Emotion Trajectories by Vulnerability Class",
+       x = "Time (days)", 
+       y = "Fear Emotion Score",
+       color = "Vulnerability") +
+  theme_minimal()
+p7
+```
+
+
+### anger
+```{r warning=FALSE}
+library(lme4)       # For mixed models
+library(lmerTest)   # For p-values
+library(tidyverse)  # Data manipulation
+
+model1.anger <- lmer(anger ~ day * HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1.anger)
+
+model1a <- lmer(anger ~ day + HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1a)
+```
+
+
+
+#### visualization
+```{r}
+library(ggplot2)
+
+# Plot trajectories by HVI class
+p8 <- ggplot(status_all_sub, aes(x = day, y = anger, color = HVI_class, group = id)) +
+ # geom_line(alpha = 0.2) +  # Individual trajectories
+  stat_summary(aes(group = HVI_class), fun = mean, geom = "line", size = 1.5) +  # Group means
+  ggsci::scale_color_lancet()  +
+  labs(title = "D. Anger Emotion Trajectories by Vulnerability Class",
+       x = "Time (days)", 
+       y = "Anger Emotion Score",
+       color = "Vulnerability") +
+  theme_minimal()
+p8
+```
+
+
+
+### sadness
+```{r warning=FALSE}
+library(lme4)       # For mixed models
+library(lmerTest)   # For p-values
+library(tidyverse)  # Data manipulation
+
+model1.sadness <- lmer(sadness ~ day * HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1.sadness)
+
+model1a <- lmer(sadness ~ day + HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1a)
+```
+
+
+
+#### visualization
+```{r}
+library(ggplot2)
+
+# Plot trajectories by HVI class
+p9 <- ggplot(status_all_sub, aes(x = day, y = sadness, color = HVI_class, group = id)) +
+ # geom_line(alpha = 0.2) +  # Individual trajectories
+  stat_summary(aes(group = HVI_class), fun = mean, geom = "line", size = 1.5) +  # Group means
+  ggsci::scale_color_lancet()  +
+  labs(title = "E. Sadness Emotion Trajectories by Vulnerability Class",
+       x = "Time (days)", 
+       y = "Sadness Emotion Score",
+       color = "Vulnerability") +
+  theme_minimal()
+p9
+```
+
+### disgust
+```{r warning=FALSE}
+library(lme4)       # For mixed models
+library(lmerTest)   # For p-values
+library(tidyverse)  # Data manipulation
+
+model1.disgust <- lmer(disgust ~ day * HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1.disgust)
+
+model1a <- lmer(disgust ~ day + HVI_class + (1 | id), 
+               data = status_all_sub, REML = TRUE)
+summary(model1a)
+```
+
+
+
+#### visualization
+```{r}
+library(ggplot2)
+
+# Plot trajectories by HVI class
+p10 <- ggplot(status_all_sub, aes(x = day, y = disgust, color = HVI_class, group = id)) +
+ # geom_line(alpha = 0.2) +  # Individual trajectories
+  stat_summary(aes(group = HVI_class), fun = mean, geom = "line", size = 1.5) +  # Group means
+  ggsci::scale_color_lancet()  +
+  labs(title = "F. Anger Emotion Trajectories by Vulnerability Class",
+       x = "Time (days)", 
+       y = "Anger Emotion Score",
+       color = "Vulnerability") +
+  theme_minimal()
+p10
+```
+
+
+### Combined daily needs plot
+
+```{r}
+library(gridExtra)
+grid.arrange(p5, p6, p7, p8, p9, p10, ncol = 2)
+```
+
+
+### Combined mixed model output
+```{r}
+library(jtools)
+export_summs(model1.hungry, model1.safe, model1.social, model1.tired, scale = TRUE)
+
+#library(sjPlot)
+#tab_model(model1.surprise, model1.joy, model1.fear, model1.anger, model1.sadness, model1.disgust, show.se = T, show.ci = F, p.style = "stars")
+```
+
+
+
